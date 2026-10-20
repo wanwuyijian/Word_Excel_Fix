@@ -23,7 +23,7 @@
 
 ## 📦 快速开始
 
-1. 下载 `dist/Word_Excel_排版优化工具_v1.0.0.exe`。
+1. 从 [Releases](https://github.com/wanwuyijian/Word_Excel_Fix/releases/latest) 下载 `Word_Excel_Layout_Optimizer_v1.0.0.exe`（25.1 MB，单文件，无需安装）。
 2. 双击运行（首次启动约 2–5 秒，单文件解包所致，属正常现象）。
 3. 把 Word/Excel 文件**拖入窗口**，或点「添加文件…」。
 4. 选择排版模板 → 勾选需要的交互选项 → 点「开始排版优化」。
