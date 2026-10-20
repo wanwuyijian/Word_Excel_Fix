@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+Word_Excel_Fix.spec
+
+# 运行时数据（日志、配置）
+data/
+*.log
+
+# 测试与渲染产物
+tests/out/
+build_tools/*.png
+build_tools/rendered/
+render_out/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 目检渲染产物
+preview/
+tests/preview/
+samples/排版优化输出/
