@@ -93,7 +93,8 @@ word_excel_排版优化工具/
 ## 🛠️ 从源码运行 / 打包
 
 ```bash
-pip install python-docx openpyxl lxml openpyxl pyinstaller tkinterdnd2
+# 依赖（开发和打包用；运行 exe 时无需安装任何东西）
+pip install -r requirements.txt
 
 # 运行
 python src/main.py
@@ -123,7 +124,8 @@ python tests/selftest.py --samples samples --out tests/out
 - 输出文件存在、可被 Word/Excel 正常打开（OOXML 结构 + 元素顺序校验）
 - 非法文件（非 OOXML、空包、错误扩展名）被正确拒绝
 
-最近一次结果：**280 项通过 / 0 项失败**，详见 [docs/测试报告.md](docs/测试报告.md)。
+最近一次结果：源码自检 **284 项通过 / 0 项失败**；打包后 exe 独立自检 **68 项通过 / 0 项失败**。
+详见 [docs/测试报告.md](docs/测试报告.md)。
 
 ## 📝 日志位置
 
