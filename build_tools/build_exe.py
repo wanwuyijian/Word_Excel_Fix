@@ -4,7 +4,7 @@
     python build_tools/build_exe.py            # 打包
     python build_tools/build_exe.py --clean    # 先清理 build/dist
 产物:
-    dist/Word_Excel_排版优化工具_v1.0.0.exe
+    dist/Word_Excel_Layout_Optimizer_v1.1.0.exe
 """
 
 from __future__ import annotations
@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.join(BASE, "build_tools"))
 
 from wxfixer.version import APP_SLUG, APP_VERSION, full_title  # noqa: E402
 
-EXE_NAME = f"Word_Excel_排版优化工具_v{APP_VERSION}"
+# 文件名用纯 ASCII：GitHub Release 会把中文附件名替换成 "_"，导致下载链接对不上。
+EXE_NAME = f"Word_Excel_Layout_Optimizer_v{APP_VERSION}"
 SPEC = os.path.join(BASE, "Word_Excel_Fix.spec")
 
 

@@ -106,6 +106,66 @@ def run_documents(files: list[str], out: str) -> None:
             check(res.elapsed < 180, f"耗时合理: {tag} ({res.elapsed:.2f}s)")
 
 
+def _png_bytes(w: int, h: int, rgb=(60, 110, 190)) -> bytes:
+    """不依赖 Pillow 的最小 PNG 生成（冻结后的 exe 里也能用）。"""
+    import struct
+    import zlib
+
+    raw = b""
+    row = bytes(rgb) * w
+    for _ in range(h):
+        raw += b"\x00" + row
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+def build_image_sample(folder: str) -> str:
+    """造一个含"超宽图 + 小图标"的 docx，用于验证图片尺寸开关。"""
+    from docx import Document
+    from docx.shared import Cm
+
+    os.makedirs(folder, exist_ok=True)
+    png = os.path.join(folder, "_selftest_img.png")
+    with open(png, "wb") as fh:
+        fh.write(_png_bytes(1200, 800))
+    doc = Document()
+    doc.add_paragraph("自检样本：图片尺寸")
+    doc.add_paragraph("下面是一张远超版心宽度的图片。")
+    doc.add_paragraph().add_run().add_picture(png, width=Cm(22))
+    doc.add_paragraph("下面是一个小图标，不应被放大。")
+    doc.add_paragraph().add_run().add_picture(png, width=Cm(1.2))
+    path = os.path.join(folder, "自检_图片.docx")
+    doc.save(path)
+    return path
+
+
+def _format_fingerprint(path: str) -> tuple:
+    """Word 排版指纹：段落对齐/缩进/行距 + 每个 run 的字体与字号。"""
+    from docx import Document
+
+    doc = Document(path)
+    rows = []
+    for p in doc.paragraphs:
+        pf = p.paragraph_format
+        rows.append(("p", str(pf.alignment), str(pf.line_spacing),
+                     str(pf.first_line_indent),
+                     tuple((r.font.name, str(r.font.size), str(r.bold))
+                           for r in p.runs)))
+    return tuple(rows)
+
+
+def _image_widths_cm(path: str) -> list:
+    from docx import Document
+
+    return [round(s.width.cm, 2) for s in Document(path).inline_shapes]
+
+
 def run_toggles(files: list[str], out: str) -> None:
     words = [f for f in files if f.lower().endswith((".docx", ".docm"))]
     if not words:
@@ -152,6 +212,154 @@ def run_toggle_expectation(path: str, name: str, toggles: ToggleOptions) -> None
         check(not style_pbb, f"开关[{name}]标题样式也无分页（残留 {style_pbb}）")
     else:
         check(True, f"开关[{name}]段前分页 {len(pbb)} 处")
+
+
+def run_new_toggles(out: str) -> None:
+    """v1.1 新增三个开关的"确有实效"验证。"""
+    from docx import Document
+
+    folder = os.path.join(out, "_toggles")
+    os.makedirs(folder, exist_ok=True)
+
+    # ---- A. 允许修改文件内容 -------------------------------------------
+    src = os.path.join(folder, "内容样本.docx")
+    doc = Document()
+    doc.add_paragraph("项目 实施 通知")
+    doc.add_paragraph("  众所周知， 该 设备 性能 很好。  ")
+    doc.add_paragraph("基本上,运行稳定。")
+    doc.add_paragraph("本项目由甲方负责验收，乙方负责交付。")
+    doc.save(src)
+    raw = [p.text for p in Document(src).paragraphs]
+
+    try:
+        res = optimize_file(src, get_template("auto"),
+                            OptimizeOptions(toggles=ToggleOptions(content=True)), out)
+        new = [p.text for p in Document(res.target).paragraphs]
+        joined = "".join(new)
+        check(len(joined) < len("".join(raw)), "内容开关：文字确有精简")
+        check("性能" in joined and "验收" in joined and "交付" in joined,
+              "内容开关：关键信息保留")
+        check("众所周知" not in joined, "内容开关：赘语已删除")
+        check(new[0].replace(" ", "") == raw[0].replace(" ", ""),
+              "内容开关：标题文字未改动（仅清理空格）")
+    except Exception:
+        FAIL.append("[异常] 内容开关")
+        traceback.print_exc()
+
+    try:
+        res = optimize_file(src, get_template("auto"),
+                            OptimizeOptions(toggles=ToggleOptions(content=False)), out)
+        same = [p.text for p in Document(res.target).paragraphs]
+        check(same == raw, "内容开关关闭：文字完全未变")
+    except Exception:
+        FAIL.append("[异常] 内容开关关闭")
+        traceback.print_exc()
+
+    # ---- B. 允许修改图片尺寸 -------------------------------------------
+    img_src = build_image_sample(folder)
+    try:
+        res = optimize_file(img_src, get_template("auto"),
+                            OptimizeOptions(toggles=ToggleOptions(image_size=True)), out)
+        widths = _image_widths_cm(res.target)
+        check(len(widths) == 2, f"图片开关：识别到 {len(widths)} 张图片")
+        if widths:
+            check(widths[0] < 21.9, f"图片开关：超宽图已缩至 {widths[0]}cm")
+            check(widths[0] > 5, f"图片开关：缩放幅度合理（{widths[0]}cm）")
+        if len(widths) > 1:
+            check(abs(widths[1] - 1.2) < 0.05,
+                  f"图片开关：小图标未放大（{widths[1]}cm）")
+    except Exception:
+        FAIL.append("[异常] 图片开关")
+        traceback.print_exc()
+
+    try:
+        res = optimize_file(img_src, get_template("auto"),
+                            OptimizeOptions(toggles=ToggleOptions(image_size=False)), out)
+        widths = _image_widths_cm(res.target)
+        check(widths and widths[0] > 21.9, f"图片开关关闭：原尺寸保留（{widths[0]}cm）")
+    except Exception:
+        FAIL.append("[异常] 图片开关关闭")
+        traceback.print_exc()
+
+    # ---- C. 自动排版总开关 ---------------------------------------------
+    body_src = os.path.join(folder, "排版样本.docx")
+    doc = Document()
+    doc.add_paragraph("一、背景")
+    doc.add_paragraph("这是正文段落，用于核对排版开关是否生效。")
+    doc.save(body_src)
+    src_fp = _format_fingerprint(body_src)
+    try:
+        res = optimize_file(body_src, get_template("auto"),
+                            OptimizeOptions(toggles=ToggleOptions(layout=False,
+                                                                 content=False,
+                                                                 image_size=False)), out)
+        check(_format_fingerprint(res.target) == src_fp, "排版开关关闭：版式零改动")
+    except Exception:
+        FAIL.append("[异常] 排版开关关闭")
+        traceback.print_exc()
+    try:
+        res = optimize_file(body_src, get_template("auto"),
+                            OptimizeOptions(toggles=ToggleOptions(content=False,
+                                                                 image_size=False)), out)
+        check(_format_fingerprint(res.target) != src_fp, "排版开关开启：版式确有调整")
+    except Exception:
+        FAIL.append("[异常] 排版开关开启")
+        traceback.print_exc()
+
+
+def run_new_toggles_excel(out: str) -> None:
+    """Excel 侧的新开关：内容精简 + 图片缩放。"""
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.drawing.image import Image as XLImage
+
+    folder = os.path.join(out, "_toggles_xl")
+    os.makedirs(folder, exist_ok=True)
+    png = os.path.join(folder, "_xl.png")
+    with open(png, "wb") as fh:
+        fh.write(_png_bytes(1600, 1000, (30, 90, 160)))
+
+    src = os.path.join(folder, "自检_开关.xlsx")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "清单"
+    ws.append(["序号", "名称", "备注"])
+    ws.append([1, "服务器", "  众所周知， 该 设备 性能 很好。  "])
+    ws.append([2, "交换机", "基本上,运行稳定。"])
+    img = XLImage(png)
+    img.width, img.height = 1600, 1000
+    ws.add_image(img, "E3")
+    wb.save(src)
+
+    before = _fingerprint(src, "excel")
+    try:
+        res = optimize_file(src, get_template("auto"),
+                            OptimizeOptions(toggles=ToggleOptions(content=False,
+                                                                  image_size=False)), out)
+        check(_fingerprint(res.target, "excel") == before, "Excel 内容关闭：文字未变")
+    except Exception:
+        FAIL.append("[异常] Excel 内容关闭")
+        traceback.print_exc()
+
+    try:
+        res = optimize_file(src, get_template("auto"),
+                            OptimizeOptions(toggles=ToggleOptions(content=True)), out)
+        wb2 = load_workbook(res.target)
+        ws2 = wb2["清单"]
+        check(ws2["B2"].value == "服务器", "Excel 内容开关：非文本列未变")
+        c2 = str(ws2["C2"].value or "")
+        check("众所周知" not in c2 and "性能" in c2,
+              f"Excel 内容开关：赘语删除且保留要点（{c2!r}）")
+        check(len(c2) < len("  众所周知， 该 设备 性能 很好。  "),
+              "Excel 内容开关：文字确有精简")
+        imgs = list(getattr(ws2, "_images", []))
+        check(len(imgs) == 1, f"Excel 图片：仍存在 {len(imgs)} 张")
+        if imgs:
+            ext = getattr(imgs[0].anchor, "ext", None)
+            cx = int(getattr(ext, "cx", 0) or 0)
+            check(0 < cx < int(1600 * 9525), "Excel 图片开关：图片已缩小")
+    except Exception:
+        FAIL.append("[异常] Excel 内容开关")
+        traceback.print_exc()
 
 
 def run_negative() -> None:
@@ -229,6 +437,8 @@ def main(argv: list[str] | None = None, writer=None) -> int:
     run_negative()
     run_documents(files, out_dir)
     run_toggles(files, out_dir)
+    run_new_toggles(out_dir)
+    run_new_toggles_excel(out_dir)
 
     from .version import APP_NAME, APP_VERSION
 

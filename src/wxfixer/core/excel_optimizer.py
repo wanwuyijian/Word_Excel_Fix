@@ -21,6 +21,8 @@ from openpyxl.worksheet.dimensions import ColumnDimension
 from openpyxl.worksheet.page import PageMargins, PrintPageSetup
 
 from ..templates.schema import LayoutSpec, ToggleOptions
+from . import content_optimizer as C
+from . import image_sizer as IMG
 
 log = logging.getLogger("wxfixer.excel")
 
@@ -93,7 +95,7 @@ class ExcelOptimizer:
         self.stats: Dict[str, int] = {
             "工作表": 0, "单元格": 0, "字体": 0, "表头": 0, "边框": 0,
             "列宽": 0, "行高": 0, "页面设置": 0, "冻结/筛选": 0, "背景色": 0,
-            "标题行": 0,
+            "标题行": 0, "写字优化": 0, "图片": 0,
         }
         self.warnings: List[str] = []
         self.analysis: Dict[str, int] = {}
@@ -105,30 +107,76 @@ class ExcelOptimizer:
     # ------------------------------------------------------------------
     def run(self) -> Tuple[Dict[str, int], Dict[str, int], List[str]]:
         total_cells = 0
+        # ① 内容优化：只对文本单元格做"减法"，公式/数字一律不碰
+        if self.opts.content:
+            self._optimize_content()
         for ws in self.wb.worksheets:
             if ws.sheet_state != "visible":
                 continue
-            try:
-                cells = self._format_sheet(ws)
-                total_cells += cells
-                if cells:
-                    self.stats["工作表"] += 1
-                else:
-                    self.warnings.append(f"工作表「{ws.title}」为空，已跳过。")
-            except Exception as exc:  # 单表失败不影响其他表
-                log.exception("工作表 %s 排版失败", ws.title)
-                self.warnings.append(f"工作表「{ws.title}」排版失败：{exc}")
+            # ② 版式优化（受"自动排版"总开关控制）
+            if self.opts.layout:
+                try:
+                    cells = self._format_sheet(ws)
+                    total_cells += cells
+                    if cells:
+                        self.stats["工作表"] += 1
+                    else:
+                        self.warnings.append(f"工作表「{ws.title}」为空，已跳过。")
+                except Exception as exc:  # 单表失败不影响其他表
+                    log.exception("工作表 %s 排版失败", ws.title)
+                    self.warnings.append(f"工作表「{ws.title}」排版失败：{exc}")
+            # ③ 图片尺寸（独立开关）
+            if self.opts.image_size:
+                try:
+                    img_stats = IMG.resize_excel_images(ws, self.spec, True)
+                    self.stats["图片"] += img_stats.resized
+                    if img_stats.resized:
+                        log.info("工作表「%s」图片：%s", ws.title, img_stats.summary())
+                except Exception as exc:
+                    log.warning("工作表 %s 图片处理失败：%s", ws.title, exc)
         self.analysis = {
-            "工作表数": self.stats["工作表"],
-            "单元格数": total_cells,
+            "工作表数": len([w for w in self.wb.worksheets if w.sheet_state == "visible"]),
+            "单元格数": total_cells if self.opts.layout else 0,
         }
-        if self.stats["工作表"] == 0:
+        if self.opts.layout and self.stats["工作表"] == 0:
             self.warnings.append("未找到可见工作表，文件可能已损坏或被保护。")
         try:
             self.wb.save(self.path)
         finally:
             self.wb.close()
         return self.stats, self.analysis, self.warnings
+
+    # ------------------------------------------------------------------
+    def _optimize_content(self) -> None:
+        """精简文本单元格：只删不改，关键信息（数字/公式）完全不动。"""
+        profile = getattr(self.spec, "content_profile", "general") or "general"
+        stats = C.ContentStats()
+        changed = 0
+        for ws in self.wb.worksheets:
+            if ws.sheet_state != "visible":
+                continue
+            limit_row = min(ws.max_row or 1, _MAX_SCAN_ROWS)
+            limit_col = min(ws.max_column or 1, _MAX_SCAN_COLS)
+            for row in ws.iter_rows(min_row=1, max_row=limit_row,
+                                    min_col=1, max_col=limit_col):
+                for cell in row:
+                    v = cell.value
+                    if not isinstance(v, str) or not v.strip():
+                        continue
+                    if v.startswith("="):      # 公式，绝不改写
+                        continue
+                    stats.paragraphs += 1
+                    new = C.optimize_text(v, profile, stats)
+                    if new == v:
+                        continue
+                    if not C.is_char_subset(C.word_char_multiset(v),
+                                            C.word_char_multiset(new)):
+                        continue
+                    cell.value = new
+                    changed += 1
+        self.stats["写字优化"] = changed
+        if changed:
+            log.info("内容优化：%s | %s", stats.summary(), C.profile_label(profile))
 
     # ------------------------------------------------------------------
     def _format_sheet(self, ws) -> int:
@@ -174,7 +222,8 @@ class ExcelOptimizer:
         if cell_count == 0:
             return 0
         self._fit_columns(ws, min_row, max_row, min_col, max_col)
-        self._setup_print(ws, min_row, max_row, min_col, max_col, has_header)
+        self._setup_print(ws, min_row, max_row, min_col, max_col, has_header,
+                          self.opts)
         self._freeze_and_filter(ws, min_row, max_row, min_col, max_col, has_header)
         return cell_count
 
@@ -513,7 +562,7 @@ class ExcelOptimizer:
 
     # ------------------------------------------------------------------
     def _setup_print(self, ws, min_row, max_row, min_col, max_col,
-                     has_header) -> None:
+                     has_header, opts=None) -> None:
         spec = self.spec
         ws.page_margins = PageMargins(
             left=spec.excel_margins_cm["left"] / 2.54,
@@ -531,7 +580,8 @@ class ExcelOptimizer:
             orientation = "landscape" if width > 8 else "portrait"
         ws.page_setup.orientation = orientation
 
-        if spec.excel_fit_to_width:
+        allow_paging = True if opts is None else bool(opts.page_break)
+        if spec.excel_fit_to_width and allow_paging:
             ws.sheet_properties.pageSetUpPr.fitToPage = True
             ws.page_setup.fitToWidth = max(1, spec.excel_fit_width_pages)
             ws.page_setup.fitToHeight = max(0, spec.excel_fit_height_pages)
@@ -542,7 +592,7 @@ class ExcelOptimizer:
             except Exception:
                 pass
 
-        if has_header and spec.excel_header_repeat:
+        if has_header and spec.excel_header_repeat and allow_paging:
             try:
                 ws.print_title_rows = f"{min_row}:{min_row}"
             except Exception as exc:
@@ -579,6 +629,24 @@ class ExcelOptimizer:
     # ------------------------------------------------------------------
     def _set_row_heights(self) -> None:
         pass
+
+
+def dump_text(path: str) -> str:
+    """按工作表/行输出全部单元格文本，用于内容校验。"""
+    wb = load_workbook(path, data_only=False)
+    parts: List[str] = []
+    try:
+        for ws in wb.worksheets:
+            parts.append(ws.title)
+            for row in ws.iter_rows():
+                for cell in row:
+                    v = cell.value
+                    if v is None:
+                        continue
+                    parts.append("" if isinstance(v, str) and not v.strip() else str(v))
+    finally:
+        wb.close()
+    return "\n".join(parts)
 
 
 def optimize_excel(path: str, spec: LayoutSpec, options) -> Tuple[Dict[str, int], Dict[str, int], List[str]]:

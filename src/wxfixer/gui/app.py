@@ -1,14 +1,14 @@
-"""主窗口。
+"""主窗口（v1.1）。
 
 布局：
-┌───────────────────────────────────────────────────────┐
-│ 标题栏（应用名 + 版本）                                 │
-├──────────────────────────┬────────────────────────────┤
-│ ① 文件（拖入/选择/列表） │ ③ 排版模板（8 选一 + 说明） │
-│ ② 交互选项（5 个开关）   │ ④ 输出与进度                │
-├──────────────────────────┴────────────────────────────┤
-│ 运行日志（可折叠）                                      │
-└───────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│ 顶栏：应用名 + 版本徽标 + 一句话定位                            │
+├────────────────────────────────┬──────────────────────────────┤
+│ ① 选择文件                      │ ③ 排版模板（8 选一 + 说明）   │
+│ ② 交互选项（版式 / 内容与素材） │ ④ 输出与执行（进度 + 主按钮） │
+├────────────────────────────────┴──────────────────────────────┤
+│ 运行日志（可折叠）                                             │
+└───────────────────────────────────────────────────────────────┘
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from tkinter import ttk
 from ..core import OptimizeError, OptimizeOptions, UnsupportedFileError, optimize_file
 from ..core.runner import SUPPORTED_EXT
 from ..templates import ALL_TEMPLATES, get_template
+from ..templates.schema import TOGGLE_META
 from ..utils import logging_setup, paths
 from ..version import APP_NAME, APP_VERSION, BUILD_DATE, GITHUB_URL, full_title
 from . import theme
@@ -34,6 +35,13 @@ from . import theme
 log = logging_setup.operations_logger()
 
 ACCEPT_EXTS = (".docx", ".docm", ".xlsx", ".xlsm")
+
+# TOGGLE_META: (key, 名称, 说明, 组, 默认)
+_GROUP_TITLE = {
+    "style": ("版式调整", "不改变任何文字，只调整版式与视觉层次"),
+    "content": ("内容与素材", "会改动文字或图片尺寸，请自行确认"),
+}
+_GROUP_ORDER = ("style", "content")
 
 
 def _base_class():
@@ -77,12 +85,10 @@ class App(_base_class()):
     def __init__(self) -> None:
         super().__init__()
         self.title(full_title())
-        self.geometry("1180x820")
-        self.minsize(1000, 720)
         self.configure(bg=theme.BG)
-        # 最大化 / 最小化：系统标题栏按钮即可，另外保证窗口可自由缩放
-        self.resizable(True, True)
-        self._center()
+        self.resizable(True, True)   # 支持最大化 / 最小化 / 自由缩放
+        self.minsize(1040, 760)
+        self._center(1220, 860)
 
         theme.apply_theme(self)
         try:
@@ -99,77 +105,121 @@ class App(_base_class()):
         self._results: list = []
         self._log_visible = tk.BooleanVar(value=True)
 
-        self.tpl_key_var = tk.StringVar(value=ALL_TEMPLATES[0].name)
-        self.toggle_vars = {
-            "font_family": tk.BooleanVar(value=True),
-            "font_size": tk.BooleanVar(value=True),
-            "font_color": tk.BooleanVar(value=True),
-            "background": tk.BooleanVar(value=True),
-            "page_break": tk.BooleanVar(value=True),
+        self.tpl_key_var = tk.StringVar(value=ALL_TEMPLATES[0].key)
+        self.toggle_vars: dict[str, tk.BooleanVar] = {
+            meta[0]: tk.BooleanVar(value=meta[4]) for meta in TOGGLE_META
         }
+        self._style_checks: list[ttk.Checkbutton] = []
 
         self._build()
         self._enable_dnd()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(80, self._poll_queue)
+        self.bind("<Configure>", self._on_resize)
         logging_setup.set_crash_notifier(self._on_crash)
         self._log_ui(f"就绪 · 日志目录 {paths.logs_dir()}")
-        log.info("界面已启动")
+        log.info("界面已启动（v%s）", APP_VERSION)
 
     # ------------------------------------------------------------------
-    # 布局
+    # 布局骨架
     # ------------------------------------------------------------------
-    def _center(self) -> None:
+    def _center(self, w: int, h: int) -> None:
         self.update_idletasks()
-        w, h = 1180, 820
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w = min(w, max(900, sw - 80))
+        h = min(h, max(700, sh - 100))
         self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 3)}")
 
     def _build(self) -> None:
-        outer = ttk.Frame(self, padding=(16, 12, 16, 10))
+        outer = ttk.Frame(self, padding=(18, 14, 18, 12))
         outer.pack(fill="both", expand=True)
 
-        header = ttk.Frame(outer)
-        header.pack(fill="x", pady=(0, 10))
-        ttk.Label(header, text=APP_NAME, style="H1.TLabel").pack(side="left")
-        ttk.Label(header, text=f"v{APP_VERSION}", style="Muted.TLabel").pack(
-            side="left", padx=(8, 0), pady=(6, 0))
-        ttk.Label(header, text="纯排版优化 · 内容零改动", style="Muted.TLabel").pack(
-            side="right", pady=(6, 0))
+        self._build_header(outer)
+
+        # 先把「底部固定区」用 side=bottom 排好，保证窗口变小时日志不会
+        # 被中间的可伸缩区域挤成 1 像素。
+        self._build_statusbar(outer)
+        self._build_log(outer)
 
         body = ttk.Frame(outer)
-        body.pack(fill="both", expand=True)
-        body.columnconfigure(0, weight=3, uniform="col")
-        body.columnconfigure(1, weight=2, uniform="col")
+        body.pack(fill="both", expand=True, pady=(12, 0))
+        self._body = body
+        body.columnconfigure(0, weight=1, uniform="col")
+        body.columnconfigure(1, weight=1, uniform="col")
         body.rowconfigure(0, weight=1)
 
-        self._build_left(body)
-        self._build_right(body)
-        self._build_log(outer)
-        self._build_statusbar(outer)
-
-    # ---- 左列 ----
-    def _build_left(self, parent) -> None:
-        left = ttk.Frame(parent)
+        left = ttk.Frame(body)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        left.rowconfigure(1, weight=3)
-        left.rowconfigure(2, weight=2)
         left.columnconfigure(0, weight=1)
+        left.rowconfigure(0, weight=3, minsize=248)
+        left.rowconfigure(1, weight=2, minsize=252)
 
-        # ① 文件
-        card = ttk.Frame(left, style="Card.TFrame", padding=14)
-        card.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
-        ttk.Label(card, text="① 选择文件", style="H2.TLabel").pack(anchor="w")
-        self.drop_hint = ttk.Label(
-            card, text="支持 Word（.docx/.docm）与 Excel（.xlsx/.xlsm），可多选或直接拖入窗口",
-            style="CardMuted.TLabel")
+        right = ttk.Frame(body)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(0, weight=3, minsize=240)
+        right.rowconfigure(1, weight=2, minsize=262)
+
+        self._build_file_card(left)
+        self._build_option_card(left)
+        self._build_template_card(right)
+        self._build_run_card(right)
+
+    def _build_header(self, parent) -> None:
+        header = ttk.Frame(parent)
+        header.pack(fill="x")
+
+        left = ttk.Frame(header)
+        left.pack(side="left")
+        row = ttk.Frame(left)
+        row.pack(anchor="w")
+        ttk.Label(row, text=APP_NAME, style="H1.TLabel").pack(side="left")
+        ttk.Label(row, text=f" v{APP_VERSION} ", style="Badge.TLabel").pack(
+            side="left", padx=(8, 0), pady=(2, 0))
+        ttk.Label(
+            left,
+            text="一键把 Word / Excel 调成「能直接交出去」的样子：默认只动排版，不动事实",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(2, 0))
+
+        ttk.Label(header, text="本地运行 · 不联网 · 不上传文件",
+                  style="BadgeGray.TLabel").pack(side="right", pady=(6, 0))
+
+        ttk.Separator(parent, orient="horizontal").pack(fill="x", pady=(10, 0))
+
+    def _card(self, parent, row: int, num: str, title: str, subtitle: str,
+              pady=(0, 10), padding=14):
+        # 外层 1px 描边 + 内层白底，让卡片在浅灰底色上有清晰的边界。
+        shell = tk.Frame(parent, bg=theme.BORDER, bd=0, highlightthickness=0)
+        shell.grid(row=row, column=0, sticky="nsew", pady=pady)
+        card = ttk.Frame(shell, style="Card.TFrame", padding=padding)
+        card.pack(fill="both", expand=True, padx=1, pady=1)
+        head = ttk.Frame(card, style="Card.TFrame")
+        head.pack(fill="x")
+        ttk.Label(head, text=num, style="Badge.TLabel").pack(side="left")
+        ttk.Label(head, text=title, style="H2.TLabel").pack(side="left", padx=(7, 0))
+        if subtitle:
+            ttk.Label(card, text=subtitle, style="CardMuted.TLabel").pack(
+                anchor="w", pady=(3, 0))
+        return card
+
+    # ---- ① 文件 ----
+    def _build_file_card(self, parent) -> None:
+        card = self._card(parent, 0, "1", "选择文件",
+                          "支持 Word（.docx / .docm）与 Excel（.xlsx / .xlsm）")
+        self.drop_hint = ttk.Label(card, text="把文件拖到这里，或点击「添加文件」",
+                                   style="CardMuted.TLabel")
         self.drop_hint.pack(anchor="w", pady=(2, 8))
 
         btns = ttk.Frame(card, style="Card.TFrame")
         btns.pack(fill="x")
         ttk.Button(btns, text="添加文件…", command=self.add_files).pack(side="left")
-        ttk.Button(btns, text="移除选中", command=self.remove_selected).pack(side="left", padx=6)
-        ttk.Button(btns, text="清空", command=self.clear_files).pack(side="left")
+        ttk.Button(btns, text="移除选中", style="Ghost.TButton",
+                   command=self.remove_selected).pack(side="left", padx=6)
+        ttk.Button(btns, text="清空", style="Ghost.TButton",
+                   command=self.clear_files).pack(side="left")
+        self.file_count_lbl = ttk.Label(btns, text="尚未添加文件", style="CardMuted.TLabel")
+        self.file_count_lbl.pack(side="right")
 
         tree_wrap = ttk.Frame(card, style="Card.TFrame")
         tree_wrap.pack(fill="both", expand=True, pady=(10, 0))
@@ -179,9 +229,9 @@ class App(_base_class()):
         self.tree.heading("type", text="类型")
         self.tree.heading("name", text="文件名")
         self.tree.heading("size", text="大小")
-        self.tree.column("type", width=76, anchor="center", stretch=False)
+        self.tree.column("type", width=70, anchor="center", stretch=False)
         self.tree.column("name", width=360, anchor="w")
-        self.tree.column("size", width=90, anchor="e", stretch=False)
+        self.tree.column("size", width=86, anchor="e", stretch=False)
         vsb = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -189,100 +239,130 @@ class App(_base_class()):
         self.tree.bind("<Double-1>", self._open_selected_file)
         self.tree.bind("<Delete>", lambda e: self.remove_selected())
 
-        # ② 交互选项
-        card2 = ttk.Frame(left, style="Card.TFrame", padding=14)
-        card2.grid(row=2, column=0, sticky="nsew")
-        ttk.Label(card2, text="② 交互选项", style="H2.TLabel").pack(anchor="w")
-        ttk.Label(card2, text="取消勾选表示「保持原样，不做这类修改」",
-                  style="CardMuted.TLabel").pack(anchor="w", pady=(2, 8))
-        grid = ttk.Frame(card2, style="Card.TFrame")
-        grid.pack(fill="x")
-        items = [
-            ("font_family", "修改字体（中英文字体族）"),
-            ("font_size", "修改字号"),
-            ("font_color", "修改字体颜色"),
-            ("background", "修改背景颜色（底纹/填充）"),
-            ("page_break", "允许调整分页（标题另起页）"),
-        ]
-        for i, (key, text) in enumerate(items):
-            ttk.Checkbutton(grid, text=text, variable=self.toggle_vars[key],
-                            style="TCheckbutton").grid(
-                row=i // 2, column=i % 2, sticky="w", padx=(0, 24), pady=4)
-        quick = ttk.Frame(card2, style="Card.TFrame")
+    # ---- ② 交互选项 ----
+    def _build_option_card(self, parent) -> None:
+        card = self._card(parent, 1, "2", "交互选项",
+                          "勾选 = 允许程序动这一类；不勾 = 该部分保持原样")
+        wrap = ttk.Frame(card, style="Card.TFrame")
+        wrap.pack(fill="both", expand=True, pady=(8, 0))
+        wrap.columnconfigure(0, weight=1, uniform="grp")
+        wrap.columnconfigure(1, weight=1, uniform="grp")
+        wrap.rowconfigure(0, weight=1)
+
+        groups = {g: [m for m in TOGGLE_META if m[3] == g] for g in _GROUP_ORDER}
+        for col, gkey in enumerate(_GROUP_ORDER):
+            title, hint = _GROUP_TITLE[gkey]
+            box = ttk.Frame(wrap, style="Group.TFrame", padding=(9, 7))
+            box.grid(row=0, column=col, sticky="nsew",
+                     padx=(0, 5) if col == 0 else (5, 0))
+            box.columnconfigure(0, weight=1)
+            ttk.Label(box, text=title, style="GroupTitle.TLabel").grid(
+                row=0, column=0, columnspan=2, sticky="w")
+            ttk.Label(box, text=hint, style="GroupMuted.TLabel",
+                      wraplength=250, justify="left").grid(
+                row=1, column=0, columnspan=2, sticky="w", pady=(1, 5))
+
+            items = groups[gkey]
+            two_col = len(items) > 2
+            for i, (key, name, _desc, _g, _d) in enumerate(items):
+                cb = ttk.Checkbutton(
+                    box, text=name, variable=self.toggle_vars[key],
+                    command=self._on_option_change,
+                    style="Group.TCheckbutton" if gkey == "style" else "Card.TCheckbutton")
+                r = 2 + (i // 2 if two_col else i)
+                c = (i % 2) if two_col else 0
+                cb.grid(row=r, column=c, sticky="w", pady=1)
+                if gkey == "style":
+                    self._style_checks.append(cb)
+
+        self.content_warn = ttk.Frame(card, style="Warning.TFrame", padding=(10, 6))
+        ttk.Label(self.content_warn, text="注意",
+                  style="WarningTitle.TLabel").pack(side="left", padx=(0, 6))
+        self.content_warn_lbl = ttk.Label(
+            self.content_warn,
+            text="已允许改动文字：程序只删赘语、合并重复标点、清理多余空格，不改写事实。",
+            style="Warning.TLabel", justify="left")
+        self.content_warn_lbl.pack(side="left", fill="x", expand=True)
+
+        quick = ttk.Frame(card, style="Card.TFrame")
         quick.pack(fill="x", pady=(8, 0))
-        ttk.Button(quick, text="全选", command=lambda: self._set_toggles(True)).pack(side="left")
-        ttk.Button(quick, text="全不选", command=lambda: self._set_toggles(False)).pack(
-            side="left", padx=6)
+        ttk.Button(quick, text="全部允许", style="Ghost.TButton",
+                   command=lambda: self._set_toggles(True)).pack(side="left")
+        ttk.Button(quick, text="全部不改", style="Ghost.TButton",
+                   command=lambda: self._set_toggles(False)).pack(side="left", padx=6)
+        ttk.Button(quick, text="只调排版", style="Ghost.TButton",
+                   command=self._preset_layout_only).pack(side="left")
+        self.opt_summary = ttk.Label(quick, text="", style="CardMuted.TLabel")
+        self.opt_summary.pack(side="right")
+        self._quick_row = quick
+        self._warn_shown = False
+        self._on_option_change()
 
-    # ---- 右列 ----
-    def _build_right(self, parent) -> None:
-        right = ttk.Frame(parent)
-        right.grid(row=0, column=1, sticky="nsew")
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(0, weight=3)
-        right.rowconfigure(1, weight=2)
+    # ---- ③ 模板 ----
+    def _build_template_card(self, parent) -> None:
+        card = self._card(parent, 0, "3", "排版模板",
+                          "按文档用途选一套版式规范；不确定就用第一项")
+        grid = ttk.Frame(card, style="Card.TFrame")
+        grid.pack(fill="x", pady=(8, 0))
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+        for i, tpl in enumerate(ALL_TEMPLATES):
+            ttk.Radiobutton(
+                grid, text=tpl.name, value=tpl.key, variable=self.tpl_key_var,
+                command=self._show_template_info, style="Card.TCheckbutton",
+            ).grid(row=i // 2, column=i % 2, sticky="w", pady=3, padx=(0, 10))
 
-        card = ttk.Frame(right, style="Card.TFrame", padding=14)
-        card.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
-        ttk.Label(card, text="③ 排版模板", style="H2.TLabel").pack(anchor="w")
-        ttk.Label(card, text="自动识别内容结构，仅调整版式与视觉层次",
-                  style="CardMuted.TLabel").pack(anchor="w", pady=(2, 8))
-
-        self.tpl_combo = ttk.Combobox(
-            card, values=[t.name for t in ALL_TEMPLATES],
-            textvariable=self.tpl_key_var, state="readonly")
-        self.tpl_combo.pack(fill="x")
-        self.tpl_combo.bind("<<ComboboxSelected>>", lambda e: self._show_template_info())
-
+        ttk.Separator(card, orient="horizontal").pack(fill="x", pady=(10, 8))
         info = ttk.Frame(card, style="Card.TFrame")
-        info.pack(fill="both", expand=True, pady=(10, 0))
-        self.tpl_desc = tk.Text(info, height=9, wrap="word", bd=0, relief="flat",
+        info.pack(fill="both", expand=True)
+        self.tpl_desc = tk.Text(info, height=8, wrap="word", bd=0, relief="flat",
                                 bg="#F8FAFD", fg=theme.TEXT, font=theme.ui_font(9),
-                                padx=10, pady=8, cursor="arrow")
+                                padx=10, pady=8, cursor="arrow", spacing1=1,
+                                spacing3=2)
         self.tpl_desc.pack(fill="both", expand=True)
         self._show_template_info()
-        self.tpl_desc.configure(state="disabled")
 
-        card2 = ttk.Frame(right, style="Card.TFrame", padding=14)
-        card2.grid(row=1, column=0, sticky="nsew")
-        ttk.Label(card2, text="④ 输出与执行", style="H2.TLabel").pack(anchor="w")
-        ttk.Label(card2, text="输出为新文件，源文件不会被修改或覆盖",
-                  style="CardMuted.TLabel").pack(anchor="w", pady=(2, 8))
-
-        row = ttk.Frame(card2, style="Card.TFrame")
-        row.pack(fill="x")
+    # ---- ④ 输出与执行 ----
+    def _build_run_card(self, parent) -> None:
+        card = self._card(parent, 1, "4", "输出与执行",
+                          "结果另存为新文件，源文件只读不改")
+        row = ttk.Frame(card, style="Card.TFrame")
+        row.pack(fill="x", pady=(8, 0))
         self.out_entry = ttk.Entry(row, textvariable=self.out_dir_var)
         self.out_entry.pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="浏览…", command=self.choose_out_dir).pack(side="left", padx=(6, 0))
-        ttk.Button(row, text="打开", command=self.open_out_dir).pack(side="left", padx=(6, 0))
+        ttk.Button(row, text="浏览…", style="Ghost.TButton",
+                   command=self.choose_out_dir).pack(side="left", padx=(6, 0))
+        ttk.Button(row, text="打开", style="Ghost.TButton",
+                   command=self.open_out_dir).pack(side="left", padx=(6, 0))
 
-        self.progress = ttk.Progressbar(card2, style="Blue.Horizontal.TProgressbar",
+        self.progress = ttk.Progressbar(card, style="Blue.Horizontal.TProgressbar",
                                         maximum=100, value=0)
-        self.progress.pack(fill="x", pady=(12, 4))
-        self.progress_txt = ttk.Label(card2, text="等待开始", style="CardMuted.TLabel")
+        self.progress.pack(fill="x", pady=(14, 5))
+        self.progress_txt = ttk.Label(card, text="等待开始", style="CardMuted.TLabel")
         self.progress_txt.pack(anchor="w")
 
-        action = ttk.Frame(card2, style="Card.TFrame")
-        action.pack(fill="x", pady=(10, 0))
-        self.run_btn = ttk.Button(action, text="开始排版优化", style="Primary.TButton",
+        action = ttk.Frame(card, style="Card.TFrame")
+        action.pack(fill="x", pady=(12, 0))
+        self.run_btn = ttk.Button(action, text="开始优化", style="Primary.TButton",
                                   command=self.start)
         self.run_btn.pack(side="left")
-        ttk.Button(action, text="打开日志目录", command=self.open_logs).pack(side="right")
+        ttk.Button(action, text="打开日志", style="Link.TButton",
+                   command=self.open_logs).pack(side="right")
+        ttk.Button(action, text="复制日志", style="Link.TButton",
+                   command=self._copy_log).pack(side="right", padx=(0, 8))
 
     # ---- 日志与状态栏 ----
     def _build_log(self, parent) -> None:
         bar = ttk.Frame(parent)
-        bar.pack(fill="x", pady=(8, 0))
+        bar.pack(side="bottom", fill="x", pady=(8, 0))
         ttk.Checkbutton(bar, text="显示运行日志", variable=self._log_visible,
                         command=self._toggle_log).pack(side="left")
         ttk.Button(bar, text="打开输出目录", style="Link.TButton",
                    command=self.open_out_dir).pack(side="right")
-        ttk.Button(bar, text="复制日志", style="Link.TButton",
-                   command=self._copy_log).pack(side="right", padx=(0, 8))
 
         self.log_frame = ttk.Frame(parent, style="Card.TFrame", padding=(1, 1))
-        self.log_frame.pack(fill="x", pady=(4, 0))
-        self.log_text = tk.Text(self.log_frame, height=7, wrap="word", bd=0, relief="flat",
+        self.log_frame.pack(side="bottom", fill="x", pady=(4, 0))
+        self.log_text = tk.Text(self.log_frame, height=6, wrap="word", bd=0, relief="flat",
                                 bg="#0F172A", fg="#D6E2F5", insertbackground="#D6E2F5",
                                 font=theme.mono_font(9), padx=10, pady=6)
         self.log_text.pack(side="left", fill="both", expand=True)
@@ -296,8 +376,9 @@ class App(_base_class()):
 
     def _build_statusbar(self, parent) -> None:
         bar = ttk.Frame(parent)
-        bar.pack(fill="x", pady=(6, 0))
-        ttk.Label(bar, text=f"版本 {APP_VERSION}（{BUILD_DATE}）", style="Muted.TLabel").pack(side="left")
+        bar.pack(side="bottom", fill="x", pady=(6, 0))
+        ttk.Label(bar, text=f"版本 {APP_VERSION} · 构建 {BUILD_DATE}",
+                  style="Muted.TLabel").pack(side="left")
         link = ttk.Label(bar, text=GITHUB_URL, style="Muted.TLabel",
                          foreground=theme.PRIMARY, cursor="hand2")
         link.pack(side="right")
@@ -306,14 +387,10 @@ class App(_base_class()):
         self.status_lbl.pack(side="right", padx=16)
 
     # ------------------------------------------------------------------
-    # 模板说明
+    # 选项联动
     # ------------------------------------------------------------------
     def _current_template(self):
-        name = self.tpl_key_var.get()
-        for t in ALL_TEMPLATES:
-            if t.name == name:
-                return t
-        return ALL_TEMPLATES[0]
+        return get_template(self.tpl_key_var.get())
 
     def _show_template_info(self) -> None:
         tpl = self._current_template()
@@ -327,6 +404,59 @@ class App(_base_class()):
     def _set_toggles(self, value: bool) -> None:
         for v in self.toggle_vars.values():
             v.set(value)
+        self._on_option_change()
+
+    def _preset_layout_only(self) -> None:
+        """只调排版：版式全开，内容与图片不动。"""
+        for key, var in self.toggle_vars.items():
+            var.set(key in ("layout", "font_family", "font_size",
+                            "font_color", "background", "page_break"))
+        self._on_option_change()
+
+    def _wrap_warn(self) -> None:
+        """警示条文字按可用宽度自动换行（窗口缩放时同步）。"""
+        try:
+            w = max(180, self.content_warn.winfo_width() - 70)
+            self.content_warn_lbl.configure(wraplength=w)
+        except Exception:
+            pass
+
+    def _on_resize(self, event) -> None:
+        if event.widget is self and self._warn_shown:
+            self._wrap_warn()
+
+    def _on_option_change(self) -> None:
+        layout_on = self.toggle_vars["layout"].get()
+        for cb in self._style_checks:
+            if str(cb.cget("text")) == "自动排版":
+                continue
+            try:
+                cb.configure(state="normal" if layout_on else "disabled")
+            except Exception:
+                pass
+
+        if self.toggle_vars["content"].get():
+            if not self._warn_shown:
+                self.content_warn.pack(fill="x", pady=(8, 0),
+                                       before=self._quick_row)
+                self._warn_shown = True
+                self.after_idle(self._wrap_warn)
+        elif self._warn_shown:
+            self.content_warn.pack_forget()
+            self._warn_shown = False
+
+        parts = []
+        if layout_on:
+            n = sum(1 for k in ("font_family", "font_size", "font_color",
+                                "background", "page_break") if self.toggle_vars[k].get())
+            parts.append(f"版式 {n}/5")
+        else:
+            parts.append("不改版式")
+        if self.toggle_vars["content"].get():
+            parts.append("精简文字")
+        if self.toggle_vars["image_size"].get():
+            parts.append("适配图片")
+        self.opt_summary.configure(text="当前：" + " · ".join(parts))
 
     # ------------------------------------------------------------------
     # 文件管理
@@ -339,6 +469,12 @@ class App(_base_class()):
         chosen = fd.askopenfilenames(title="选择要优化排版的文件", filetypes=patterns)
         if chosen:
             self._add_paths(chosen)
+
+    def _refresh_count(self) -> None:
+        n = len(self.files)
+        self.file_count_lbl.configure(
+            text="尚未添加文件" if not n else f"已选 {n} 个文件")
+        self.status_lbl.configure(text="" if not n else f"待处理 {n} 个文件")
 
     def _add_paths(self, items) -> None:
         added = 0
@@ -357,9 +493,9 @@ class App(_base_class()):
             added += 1
         if added:
             self._sync_out_dir()
+            self._refresh_count()
             self._log_ui(f"已添加 {added} 个文件，共 {len(self.files)} 个")
             log.info("添加文件 %d 个（累计 %d）", added, len(self.files))
-            self.status_lbl.configure(text=f"待处理 {len(self.files)} 个文件")
 
     @staticmethod
     def _type_label(ext: str) -> str:
@@ -381,16 +517,16 @@ class App(_base_class()):
                 self.files.remove(iid)
             self.tree.delete(iid)
         self._sync_out_dir()
-        self.status_lbl.configure(text=f"待处理 {len(self.files)} 个文件")
+        self._refresh_count()
 
     def clear_files(self) -> None:
         for iid in self.tree.get_children():
             self.tree.delete(iid)
         self.files.clear()
         self._sync_out_dir()
+        self._refresh_count()
         self.progress["value"] = 0
         self.progress_txt.configure(text="等待开始")
-        self.status_lbl.configure(text="")
 
     def _open_selected_file(self, _event=None) -> None:
         sel = self.tree.selection()
@@ -455,7 +591,7 @@ class App(_base_class()):
         try:
             if _bind_dnd(self):
                 log.info("拖放功能已启用")
-                self.drop_hint.configure(text="可拖入文件，或点击「添加文件…」")
+                self.drop_hint.configure(text="把文件拖到这里，或点击「添加文件」")
             else:
                 raise RuntimeError("no widget accepted DnD")
         except Exception:
@@ -478,22 +614,24 @@ class App(_base_class()):
         if not self.files:
             mb.showinfo("请先选择文件", "请先添加至少一个 Word 或 Excel 文件。")
             return
+        toggles = self._toggles_obj()
+        if not toggles.any_change:
+            mb.showinfo("没有可执行的修改",
+                        "当前所有选项都处于「不改动」状态，请至少勾选一项。")
+            return
         out_dir = self.out_dir_var.get().strip()
         if not out_dir:
             out_dir = paths.default_output_dir(self.files[0])
             self.out_dir_var.set(out_dir)
         tpl = self._current_template()
-        options = OptimizeOptions(
-            template_key=tpl.key,
-            toggles=self._toggles_obj(),
-        )
+        options = OptimizeOptions(template_key=tpl.key, toggles=toggles)
         self._running = True
         self._results = []
         self.run_btn.configure(state="disabled", text="正在处理…")
         self.progress["value"] = 0
-        self._log_ui("─" * 60, "muted")
+        self._log_ui("─" * 62, "muted")
         log.info("开始批量优化：%d 个文件 | 模板=%s | 开关=%s",
-                 len(self.files), tpl.name, options.toggles.to_dict())
+                 len(self.files), tpl.name, toggles.to_dict())
 
         files = list(self.files)
         self.worker = threading.Thread(
@@ -527,13 +665,10 @@ class App(_base_class()):
                 self.queue.put(("error", path, str(exc)))
             except Exception as exc:  # 未预期异常：写崩溃日志但不中断整批
                 failed += 1
-                import traceback
-
                 logging_setup.write_crash_log(
                     type(exc), exc, exc.__traceback__,
                     f"处理文件: {path}")
                 self.queue.put(("error", path, f"{type(exc).__name__}: {exc}"))
-                _ = traceback
         self.queue.put(("done", ok, failed))
 
     def _poll_queue(self) -> None:
@@ -570,19 +705,20 @@ class App(_base_class()):
 
     def _on_done(self, ok: int, failed: int) -> None:
         self._running = False
-        self.run_btn.configure(state="normal", text="开始排版优化")
+        self.run_btn.configure(state="normal", text="开始优化")
         self.progress["value"] = 100
         if failed == 0:
             self.progress_txt.configure(text=f"全部完成：成功 {ok} 个")
             self.status_lbl.configure(text=f"成功 {ok} 个", foreground=theme.SUCCESS)
-            self._log_ui(f"完成：成功 {ok} 个，全部文件未改动原文内容。", "ok")
+            self._log_ui(f"完成：成功 {ok} 个。", "ok")
         else:
             self.progress_txt.configure(text=f"完成：成功 {ok} 个，失败 {failed} 个")
-            self.status_lbl.configure(text=f"成功 {ok} / 失败 {failed}", foreground=theme.DANGER)
+            self.status_lbl.configure(text=f"成功 {ok} / 失败 {failed}",
+                                      foreground=theme.DANGER)
             self._log_ui(f"完成：成功 {ok} 个，失败 {failed} 个，详见上方错误行。", "warn")
         log.info("批量完成：成功 %d，失败 %d", ok, failed)
         if ok and failed == 0:
-            if mb.askyesno("排版完成", f"已成功优化 {ok} 个文件。\n\n是否打开输出目录？"):
+            if mb.askyesno("优化完成", f"已成功处理 {ok} 个文件。\n\n是否打开输出目录？"):
                 self.open_out_dir()
 
     # ------------------------------------------------------------------

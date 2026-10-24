@@ -305,6 +305,44 @@ def make_word_messy(path: str) -> None:
     doc.save(path)
 
 
+def make_word_verbose(path: str) -> None:
+    """冗长草稿：满篇赘语、重复标点、中文间空格，用来验证「优化文字内容」开关。"""
+    doc = Document()
+    p = doc.add_paragraph("关于 园区 网络 升级 改造 的 说明")
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _messy_font(p.runs[0], 10, "Calibri")
+
+    doc.add_paragraph("一、背景")
+    doc.add_paragraph(
+        "众所周知，随着园区业务的快速增长，现有的网络设备在很多方面已经逐渐难以满足"
+        "日益增长的业务需求，因此我们 认为 ，对园区网络进行升级改造是非常有必要的。"
+    )
+    doc.add_paragraph("二、改造内容")
+    doc.add_paragraph(
+        "值得一提的是，，本次改造主要针对核心交换机与汇聚交换机进行更新换代，，"
+        "并且同时对机房内的布线系统进行整理与优化，基本上可以满足未来五年的使用需求。"
+    )
+    doc.add_paragraph(
+        "在设备更换的过程中，需要提前制定割接方案，实际上，我们还要对每一个割接步骤"
+        "进行详细的评估与演练，确保在出现异常的情况下能够快速回退。"
+    )
+    doc.add_paragraph("三、实施安排")
+    doc.add_paragraph(
+        "整个工程计划分三个阶段实施，也就是说，第一阶段完成设备到货与上架，"
+        "第二阶段完成配置调试与业务割接，第三阶段完成验收与文档归档。"
+    )
+    doc.add_paragraph(
+        "我们会安排专人负责现场协调，并且在每个阶段结束后提交阶段性报告！！！"
+        "请各部门务必注意，割接窗口期内相关业务可能出现短暂中断，请提前做好通知工作。"
+    )
+    doc.add_paragraph()
+    p = doc.add_paragraph("××园区信息中心")
+    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p = doc.add_paragraph("2026年10月8日")
+    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    doc.save(path)
+
+
 def main() -> None:
     os.makedirs(OUT, exist_ok=True)
     jobs = [
@@ -314,6 +352,7 @@ def main() -> None:
         (make_word_product, "产品介绍_原始.docx"),
         (make_word_process, "技术流程_原始.docx"),
         (make_word_spec, "技术说明_原始.docx"),
+        (make_word_verbose, "冗长草稿_原始.docx"),
         (make_word_messy, "混乱排版_原始.docx"),
         (make_excel_tender, "评分明细_原始.xlsx"),
         (make_excel_inventory, "设备清单_原始.xlsx"),

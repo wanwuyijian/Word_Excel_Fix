@@ -148,6 +148,38 @@ def _text_fingerprint(path: str, doc_type: str) -> str:
     return xl_fp(path)
 
 
+def _text_chars(path: str, doc_type: str):
+    """正文的"文字字符"多重集（忽略标点与空白），用于内容精简后的校验。"""
+    from .content_optimizer import word_char_multiset
+
+    if doc_type == "word":
+        from .word_optimizer import dump_text
+
+        text = dump_text(path)
+    else:
+        from .excel_optimizer import dump_text as xl_dump
+
+        text = xl_dump(path)
+    return word_char_multiset(text)
+
+
+def _is_content_subset(path_before: str, path_after: str, doc_type: str) -> bool:
+    """勾选"优化文字内容"时的校验：优化后的文字字符必须是原文的子集。
+
+    即：不允许出现任何一个原文没有（或数量更多）的文字字符，
+    保证工具只做"精简"，绝不会凭空写出新内容。
+    """
+    try:
+        before = _text_chars(path_before, doc_type)
+        after = _text_chars(path_after, doc_type)
+    except Exception as exc:  # 取不到文本时保守判为不通过
+        log.warning("内容子集校验无法执行：%s", exc)
+        return False
+    from .content_optimizer import is_char_subset
+
+    return is_char_subset(before, after)
+
+
 def optimize_file(
     src: str,
     template: LayoutSpec,
@@ -198,10 +230,16 @@ def optimize_file(
         report(80, "正在校验内容完整性")
         after = _text_fingerprint(tmp, doc_type)
         if before != after:
-            raise OptimizeError(
-                "内容完整性校验未通过（优化前后正文文本不一致），已放弃输出。"
-                "为防止误改文档，请把源文件反馈给开发者。"
-            )
+            # 勾选了"优化文字内容"时允许正文变少（只删不增），此时用
+            # 更宽松但仍严格的校验：文字字符必须是原文的子集。
+            if not (options.toggles.content
+                    and _is_content_subset(src, tmp, doc_type)):
+                raise OptimizeError(
+                    "内容完整性校验未通过（优化前后正文文本不一致），已放弃输出。"
+                    "为防止误改文档，请把源文件反馈给开发者。"
+                )
+            report(85, "已按「优化文字内容」开关精简文字")
+            log.info("内容校验：勾选了文字优化，文字仅做减法，校验通过")
 
         os.replace(tmp, target)
     except Exception:

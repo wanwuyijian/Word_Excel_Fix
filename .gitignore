@@ -17,6 +17,7 @@ data/
 
 # 测试与渲染产物
 tests/out/
+tests/out_v11/
 build_tools/*.png
 build_tools/rendered/
 render_out/

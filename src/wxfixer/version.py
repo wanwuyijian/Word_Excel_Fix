@@ -9,9 +9,9 @@ APP_NAME_EN = "Word & Excel Layout Optimizer"
 APP_SLUG = "Word_Excel_Fix"
 
 # 语义化版本：主版本.次版本.修订号
-APP_VERSION_TUPLE = (1, 0, 0)
+APP_VERSION_TUPLE = (1, 1, 0)
 APP_VERSION = ".".join(str(x) for x in APP_VERSION_TUPLE)
-BUILD_DATE = "2026-10-20"
+BUILD_DATE = "2026-10-24"
 
 __version__ = APP_VERSION
 

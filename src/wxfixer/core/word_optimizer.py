@@ -28,6 +28,8 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from ..templates.schema import FontSpec, LayoutSpec, ToggleOptions
+from . import content_optimizer as C
+from . import image_sizer as IMG
 from . import analyze as A
 from . import ooxml as X
 
@@ -38,6 +40,15 @@ _ALIGN_MAP = {
     "center": WD_ALIGN_PARAGRAPH.CENTER,
     "right": WD_ALIGN_PARAGRAPH.RIGHT,
     "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
+}
+
+# 纸张规格（twips）：(长边, 短边)，A4 = 21×29.7cm，A3 = 29.7×42cm
+_PAPER_SIZES = {
+    "A4": (16838, 11906),
+    "A3": (23811, 16838),
+    "A5": (11906, 8391),
+    "LETTER": (15840, 12240),
+    "LEGAL": (20160, 12240),
 }
 
 
@@ -80,7 +91,7 @@ class WordOptimizer:
         self.doc = Document(path)
         self.stats: Dict[str, int] = {
             "页面设置": 0, "段落": 0, "字体": 0, "表格": 0, "标题": 0,
-            "分页": 0, "页眉页脚": 0,
+            "分页": 0, "页眉页脚": 0, "图片": 0,
         }
         self.warnings: List[str] = []
         self.analysis = A.analyze(self.doc)
@@ -116,16 +127,64 @@ class WordOptimizer:
     # 入口
     # ------------------------------------------------------------------
     def run(self) -> Tuple[Dict[str, int], Dict[str, int], List[str]]:
-        self._setup_sections()
-        self._apply_normal_style()
-        self._apply_heading_styles()
-        self._apply_paragraphs()
-        self._format_tables()
-        self._setup_footer()
-        self._synchronize_styles()
+        # ① 内容优化：只做"减法"（删赘语/规整空格标点），绝不新增文字。
+        #    放在最前面，避免后续按段落长度做的判断受冗余文字影响。
+        if self.opts.content:
+            self._optimize_content()
+        # ② 版式优化：受"自动排版"总开关控制
+        if self.opts.layout:
+            self._setup_sections()
+            self._apply_normal_style()
+            self._apply_heading_styles()
+            self._apply_paragraphs()
+            self._format_tables()
+            self._setup_footer()
+            self._synchronize_styles()
+        # ③ 图片尺寸：独立开关，即使不做版式也能单独生效
+        if self.opts.image_size:
+            self._resize_images()
         self.doc.save(self.path)
         self._validate()
         return self.stats, self.analysis.summary(), self.warnings
+
+    # ------------------------------------------------------------------
+    # 内容优化（可选）
+    # ------------------------------------------------------------------
+    def _optimize_content(self) -> None:
+        """精简段落文字：只删不改，逐段安全校验。"""
+        profile = getattr(self.spec, "content_profile", "general") or "general"
+        texts = [p.text for p in self.doc.paragraphs]
+        stats = C.ContentStats(paragraphs=len(texts))
+        changed = 0
+        for para in self.doc.paragraphs:
+            old = para.text
+            if not old or not old.strip():
+                continue
+            new = C.optimize_text(old, profile, stats)
+            if new == old:
+                continue
+            # 安全校验：文字字符只能是原文子集（不引入任何新字）
+            if not C.is_char_subset(C.word_char_multiset(old), C.word_char_multiset(new)):
+                self.warnings.append(f"段落内容优化被跳过（字符校验未通过）：{old[:24]}…")
+                continue
+            if C.rewrite_paragraph_runs(para, new):
+                changed += 1
+        self.stats["文字优化"] = changed
+        if changed:
+            self.stats["精简字数"] = stats.removed_chars
+            log.info("内容优化：%s | %s", stats.summary(), C.profile_label(profile))
+        else:
+            log.info("内容优化：%s", stats.summary())
+
+    # ------------------------------------------------------------------
+    def _resize_images(self) -> None:
+        """按模板参数调整图片尺寸，避免超出版心或过小看不清。"""
+        img_stats, _ = IMG.resize_word_images(self.doc, self.spec, True)
+        self.stats["图片"] = img_stats.resized
+        if img_stats.total:
+            log.info("图片处理：%s", img_stats.summary())
+        if img_stats.details:
+            self.warnings.append("图片尺寸：" + "；".join(img_stats.details[:5]))
 
     # ------------------------------------------------------------------
     # 页面与样式层
@@ -151,12 +210,23 @@ class WordOptimizer:
             if orientation is None and spec.preferred_landscape_chars:
                 if self.analysis.max_line_chars > spec.preferred_landscape_chars:
                     orientation = "landscape"
+
+            # 先定方向（python-docx 会交换宽高），再按纸张规格覆盖具体尺寸
             if orientation in ("portrait", "landscape"):
+                section.orientation = (WD_ORIENT.LANDSCAPE
+                                       if orientation == "landscape"
+                                       else WD_ORIENT.PORTRAIT)
+            paper = _PAPER_SIZES.get((spec.page_size or "").upper())
+            if paper:
+                long_edge, short_edge = paper
+                landscape = orientation == "landscape"
+                w_tw = long_edge if landscape else short_edge
+                h_tw = short_edge if landscape else long_edge
                 pg_sz = X.insert_ordered(sec_pr, "w:pgSz", X.SECTPR_SEQ)
-                if orientation == "landscape":
-                    section.orientation = WD_ORIENT.LANDSCAPE
-                else:
-                    section.orientation = WD_ORIENT.PORTRAIT
+                pg_sz.set(qn("w:w"), str(w_tw))
+                pg_sz.set(qn("w:h"), str(h_tw))
+                pg_sz.set(qn("w:orient"),
+                           "landscape" if landscape else "portrait")
             self.stats["页面设置"] += 1
         _ = default_section
 
@@ -764,6 +834,11 @@ def _has_page_break(ppr) -> bool:
         return False
     val = el.get(qn("w:val"))
     return val is None or val.lower() not in ("0", "false", "off")
+
+
+def _is_char_subset(before, after) -> bool:
+    """after 的每个字符计数都不能超过 before（即只删不增）。"""
+    return C.is_char_subset(before, after)
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,10 @@ SUCCESS = "#10B981"
 DANGER = "#DC2626"
 WARN = "#D97706"
 ROW_ALT = "#F9FBFD"
+WARN_BG = "#FFF7E6"
+WARN_BORDER = "#F5C97B"
+DROP_BG = "#F2F7FF"
+DROP_BORDER = "#C3D7F7"
 
 
 def pick_font(candidates, fallback="Microsoft YaHei UI") -> str:
@@ -103,4 +107,37 @@ def apply_theme(root) -> ttk.Style:
     style.configure("Card.TLabelframe", background=CARD, bordercolor=BORDER)
     style.configure("Card.TLabelframe.Label", background=CARD, foreground=TEXT,
                     font=ui_font(10, "bold"))
+
+    # ---- v1.1 新增：分组卡片、徽标、警示条 ----
+    style.configure("Group.TFrame", background="#F8FAFD")
+    style.configure("Group.TLabel", background="#F8FAFD", foreground=TEXT)
+    style.configure("GroupMuted.TLabel", background="#F8FAFD", foreground=TEXT_MUTED,
+                    font=ui_font(9))
+    style.configure("GroupTitle.TLabel", background="#F8FAFD", foreground=TEXT,
+                    font=ui_font(9, "bold"))
+    style.configure("Group.TCheckbutton", background="#F8FAFD", foreground=TEXT)
+    style.map("Group.TCheckbutton", background=[("active", "#F8FAFD")])
+    style.configure("Card.TCheckbutton", background=CARD, foreground=TEXT)
+    style.map("Card.TCheckbutton", background=[("active", CARD)])
+
+    style.configure("Warning.TFrame", background=WARN_BG)
+    style.configure("Warning.TLabel", background=WARN_BG, foreground="#92400E",
+                    font=ui_font(9))
+    style.configure("WarningTitle.TLabel", background=WARN_BG, foreground="#92400E",
+                    font=ui_font(9, "bold"))
+
+    style.configure("Badge.TLabel", background=PRIMARY_LIGHT, foreground=PRIMARY_DARK,
+                    font=ui_font(8, "bold"), padding=(6, 2))
+    style.configure("BadgeGray.TLabel", background="#EEF2F7", foreground=TEXT_MUTED,
+                    font=ui_font(8, "bold"), padding=(6, 2))
+
+    style.configure("Ghost.TButton", padding=(10, 6), background="#FFFFFF",
+                    foreground=TEXT, bordercolor=BORDER, relief="flat")
+    style.map("Ghost.TButton",
+              background=[("active", "#F1F5F9"), ("disabled", "#F7F8FA")],
+              foreground=[("disabled", "#A8B0BD")])
+
+    style.configure("Soft.Horizontal.TProgressbar", troughcolor="#E8EDF5",
+                    background=PRIMARY, bordercolor="#E8EDF5",
+                    lightcolor=PRIMARY, darkcolor=PRIMARY, thickness=8)
     return style
